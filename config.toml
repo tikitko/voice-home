@@ -1,0 +1,67 @@
+[vosk]
+model_path = "./vosk-model-small-ru-0.22"
+
+[assistant]
+wake_word = "ирина"
+stop_words = ["стоп", "спасибо", "хватит", "отмена"]
+system_prompt = "Ты голосовой ассистент по имени Ирина. Отвечай кратко на русском языке. Ты управляешь LED лентой, имеешь доступ к системным инструментам и можешь включать компьютеры через WOL, компьютеры которые ты знаешь: компьютер 1: 1c:b7:2c:ef:d3:65 компьютер 2: bc:fc:e7:d9:04:82."
+
+[openai]
+model = "gpt-4o-mini"
+
+[tts]
+model_path = "./ru_RU-irina-medium/ru_RU-irina-medium.onnx.json"
+
+[time_range]
+start_hour = 0
+end_hour = 23
+
+# ---------------------------------------------------------------------------
+# Tools — each [[tool]] block defines a tool available to the assistant.
+# The command is executed via `sh -c` with {{param}} placeholders substituted.
+# ---------------------------------------------------------------------------
+
+[[tool]]
+name = "get_led_state"
+description = "Get current LED strip state (is_enabled, red, green, blue)"
+command = "curl -s http://localhost:70/state"
+
+[[tool]]
+name = "set_led_color"
+description = "Set the LED strip color"
+command = "curl -s -X PUT http://localhost:70/color -d '{\"color\": \"{{color}}\"}'"
+required_params = ["color"]
+
+[tool.params.color]
+type = "string"
+description = "Color name or hex code"
+
+[[tool]]
+name = "set_led_power"
+description = "Turn the LED strip on or off"
+command = "curl -s -X PUT http://localhost:70/power -d '{\"on\": {{on}}}'"
+required_params = ["on"]
+
+[tool.params.on]
+type = "boolean"
+description = "true to turn on, false to turn off"
+
+[[tool]]
+name = "get_current_time"
+description = "Get the current date and time"
+command = "date '+%Y-%m-%d %H:%M:%S'"
+
+[[tool]]
+name = "get_system_info"
+description = "Get system uptime and load"
+command = "uptime"
+
+[[tool]]
+name = "wake_on_lan"
+description = "Wake a computer via Wake-on-LAN by sending a magic packet to the given MAC address"
+command = "wakeonlan {{mac_address}}"
+required_params = ["mac_address"]
+
+[tool.params.mac_address]
+type = "string"
+description = "MAC address of the computer to wake (e.g. 1c:b7:2c:ef:d3:65)"

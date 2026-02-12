@@ -1,141 +1,206 @@
+mod config;
+mod openai;
+mod tools;
+mod tts;
+
 use chrono::*;
 use voskrust::api::*;
 use voskrust::sound::*;
 
-const HOST: &'static str = "http://localhost:70/";
-const MODEL: &'static str = "./vosk-model-small-ru-0.22";
-const TIME_RANGE_START_HOUR: u32 = 1;
-const TIME_RANGE_END_HOUR: u32 = 18;
+use config::Config;
+use openai::{Message, OpenAi};
+use tools::ToolManager;
+use tts::Tts;
 
-const WORDED_ACTIONS: &[(&'static str, LedAction)] = &[
-    ("свет", LedAction::Power(true)),
-    ("тьма", LedAction::Power(false)),
-    (
-        "белый",
-        LedAction::Color {
-            red: 0,
-            green: 0,
-            blue: 0,
-        },
-    ),
-    (
-        "фиолетовый",
-        LedAction::Color {
-            red: 255,
-            green: 0,
-            blue: 255,
-        },
-    ),
-    (
-        "пурпурный",
-        LedAction::Color {
-            red: 128,
-            green: 0,
-            blue: 128,
-        },
-    ),
-    (
-        "красный",
-        LedAction::Color {
-            red: 255,
-            green: 0,
-            blue: 0,
-        },
-    ),
-    (
-        "зелёный",
-        LedAction::Color {
-            red: 0,
-            green: 255,
-            blue: 0,
-        },
-    ),
-    (
-        "голубой",
-        LedAction::Color {
-            red: 205,
-            green: 92,
-            blue: 92,
-        },
-    ),
-    (
-        "синий",
-        LedAction::Color {
-            red: 0,
-            green: 0,
-            blue: 255,
-        },
-    ),
-];
+const CONTINUATION_CHUNKS: u32 = 3; // ~300 ms grace period after final result for multi-sentence
+const SILENCE_TO_IDLE_CHUNKS: u32 = 20; // ~1.0 s of silence after response → idle
 
-enum LedAction {
-    Color { red: u8, green: u8, blue: u8 },
-    Power(bool),
+// ---------------------------------------------------------------------------
+// State machine
+// ---------------------------------------------------------------------------
+
+#[derive(PartialEq)]
+enum AppState {
+    Idle,
+    ListeningQuery,
 }
 
-impl LedAction {
-    fn perform(&self) {
-        let link = format!(
-            "{host}{action}",
-            host = HOST,
-            action = match self {
-                LedAction::Color { red, green, blue } =>
-                    format!("color/{r}/{g}/{b}", r = red, g = green, b = blue,),
-                LedAction::Power(state) => format!(
-                    "power/{state}",
-                    state = if *state { "true" } else { "false" },
-                ),
-            }
-        );
-        _ = reqwest::blocking::Client::new().put(link).send();
-    }
-}
+// ---------------------------------------------------------------------------
+// Entry point
+// ---------------------------------------------------------------------------
 
 fn main() {
     set_log_level(1);
-    let model = Model::new(MODEL).unwrap();
 
-    let mut recognizer = None;
-    let mut audioreader = None;
+    // ---- config ----
+    let config_path = std::env::args().nth(1).unwrap_or_else(|| "config.toml".into());
+    let config = Config::load(&config_path).unwrap_or_else(|e| {
+        eprintln!("Ошибка конфигурации: {}", e);
+        std::process::exit(1);
+    });
+
+    // ---- vosk model ----
+    let model = Model::new(&config.vosk.model_path).unwrap();
+
+    // ---- OpenAI client ----
+    let ai = OpenAi::new(&config.openai.model);
+
+    // ---- tools ----
+    let tool_mgr = ToolManager::new(config.tool);
+
+    // ---- TTS ----
+    let tts = Tts::new(&config.tts.model_path);
+
+    // ---- main-loop state ----
+    let mut recognizer: Option<Recognizer> = None;
+    let mut audioreader: Option<ParecStream> = None;
+
+    let mut state = AppState::Idle;
+    let mut accumulated_text = String::new();
+    let mut silence_counter: u32 = 0;
+    let mut history: Vec<Message> =
+        openai::initial_history(&config.assistant.system_prompt);
+
+    eprintln!("[Система]: Голосовой ассистент запущен.");
+    eprintln!(
+        "[Система]: Скажите «{}» для активации.",
+        config.assistant.wake_word
+    );
+
     loop {
-        let current_hour = Local::now().hour();
-        if current_hour >= TIME_RANGE_START_HOUR && current_hour < TIME_RANGE_END_HOUR {
+        // ---- time-range gate ----
+        let hour = Local::now().hour();
+        if hour < config.time_range.start_hour || hour >= config.time_range.end_hour {
+            println!("{}", hour);
             recognizer = None;
             audioreader = None;
+            state = AppState::Idle;
+            accumulated_text.clear();
+            silence_counter = 0;
+            history = openai::initial_history(&config.assistant.system_prompt);
             std::thread::sleep(std::time::Duration::from_secs(60));
             continue;
         }
+
+        // ---- ensure recognizer & audio stream ----
         if recognizer.is_none() {
             recognizer = Some(Recognizer::new(&model, 16000f32));
         }
         if audioreader.is_none() {
             audioreader = Some(ParecStream::init().unwrap());
         }
+
+        // ---- read 100 ms of audio ----
         let buf = {
-            let audioreader = audioreader.as_mut().unwrap();
-            audioreader.read_n_milliseconds(100.0).unwrap()
+            let ar = audioreader.as_mut().unwrap();
+            ar.read_n_milliseconds(100.0).unwrap()
         };
 
-        let text = {
-            let recognizer = recognizer.as_mut().unwrap();
-            if recognizer.accept_waveform(&buf[..]) {
-                recognizer.final_result()
+        // ---- speech recognition ----
+        let (text, is_final) = {
+            let rec = recognizer.as_mut().unwrap();
+            if rec.accept_waveform(&buf[..]) {
+                (rec.final_result(), true)
             } else {
-                recognizer.partial_result()
+                (rec.partial_result(), false)
             }
         };
 
-        if text.is_empty() {
-            continue;
-        }
+        // ---- state machine ----
+        match state {
+            // ====================== IDLE ======================
+            AppState::Idle => {
+                if let Some(pos) = text.find(&*config.assistant.wake_word) {
+                    let remainder = if is_final {
+                        text[pos + config.assistant.wake_word.len()..]
+                            .trim()
+                            .to_string()
+                    } else {
+                        String::new()
+                    };
 
-        for (action_word, action) in WORDED_ACTIONS {
-            if !text.contains(action_word) {
-                continue;
+                    eprintln!("[Ассистент]: Слушаю...");
+                    state = AppState::ListeningQuery;
+                    accumulated_text = remainder;
+                    silence_counter = 0;
+                    history =
+                        openai::initial_history(&config.assistant.system_prompt);
+                    recognizer = None;
+                }
             }
-            recognizer = None;
-            std::thread::spawn(|| action.perform());
-            break;
+
+            // ====================== LISTENING ======================
+            AppState::ListeningQuery => {
+                // -- stop word → immediately back to idle --
+                if config
+                    .assistant
+                    .stop_words
+                    .iter()
+                    .any(|w| text.contains(w.as_str()))
+                {
+                    eprintln!("[Ассистент]: Хорошо, до встречи.");
+                    state = AppState::Idle;
+                    accumulated_text.clear();
+                    silence_counter = 0;
+                    history =
+                        openai::initial_history(&config.assistant.system_prompt);
+                    recognizer = None;
+                    continue;
+                }
+
+                // -- accumulate finalized text, track silence --
+                if is_final && !text.is_empty() {
+                    if !accumulated_text.is_empty() {
+                        accumulated_text.push(' ');
+                    }
+                    accumulated_text.push_str(&text);
+                    silence_counter = 0;
+                } else if is_final && text.is_empty() && !accumulated_text.is_empty() {
+                    // Empty final after we have text — Vosk detected end of utterance.
+                    // Brief grace period then send to OpenAI.
+                    silence_counter += CONTINUATION_CHUNKS;
+                } else if text.is_empty() {
+                    silence_counter += 1;
+                } else {
+                    // non-empty partial → user is still speaking
+                    silence_counter = 0;
+                }
+
+                // -- have accumulated text & grace period elapsed → send to OpenAI --
+                if !accumulated_text.is_empty()
+                    && silence_counter >= CONTINUATION_CHUNKS
+                {
+                    eprintln!("[Вы]: {}", accumulated_text);
+
+                    let tools = tool_mgr.tools();
+                    let response = ai.ask(
+                        &accumulated_text,
+                        &mut history,
+                        &tools,
+                        &mut |name, args| tool_mgr.call_tool(name, args),
+                    );
+                    eprintln!("[Ассистент]: {}", response);
+
+                    // Stop mic → speak → mic auto-recreates next iteration
+                    audioreader = None;
+                    tts.speak(&response);
+                    recognizer = None;
+
+                    accumulated_text.clear();
+                    silence_counter = 0;
+                }
+
+                // -- silence with no pending text → go idle --
+                if accumulated_text.is_empty()
+                    && silence_counter >= SILENCE_TO_IDLE_CHUNKS
+                {
+                    eprintln!("[Ассистент]: (режим ожидания)");
+                    state = AppState::Idle;
+                    history =
+                        openai::initial_history(&config.assistant.system_prompt);
+                    recognizer = None;
+                }
+            }
         }
     }
 }

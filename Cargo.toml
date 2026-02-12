@@ -1,9 +1,17 @@
 [package]
 name = "voice-led"
-version = "0.0.1"
-edition = "2021"
+version = "1.0.0"
+edition = "2024"
 
 [dependencies]
 voskrust = { git = "https://github.com/tikitko/voskrust.git" }
-reqwest = { version = "0.12.3", features = ["blocking"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+toml = "0.8"
 chrono = "0.4.38"
+async-openai = { version = "0.32", features = ["chat-completion"] }
+tokio = { version = "1", features = ["rt-multi-thread"] }
+piper-rs = "0.1"
+rodio = "0.19"
+ort = "=2.0.0-rc.9"
+ort-sys = "=2.0.0-rc.9"
