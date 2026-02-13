@@ -113,21 +113,18 @@ fn main() {
         match state {
             // ====================== IDLE ======================
             AppState::Idle => {
-                if let Some(pos) = text.find(&*config.assistant.wake_word) {
-                    let remainder = if is_final {
-                        text[pos + config.assistant.wake_word.len()..]
+                if is_final {
+                    if let Some(pos) = text.find(&*config.assistant.wake_word) {
+                        let remainder = text[pos + config.assistant.wake_word.len()..]
                             .trim()
-                            .to_string()
-                    } else {
-                        String::new()
-                    };
+                            .to_string();
 
-                    eprintln!("[Ассистент]: Слушаю...");
-                    state = AppState::ListeningQuery;
-                    accumulated_text = remainder;
-                    silence_counter = 0;
-                    history = openai::initial_history(&config.assistant.system_prompt);
-                    recognizer = None;
+                        state = AppState::ListeningQuery;
+                        accumulated_text = remainder;
+                        silence_counter = 0;
+                        history = openai::initial_history(&config.assistant.system_prompt);
+                        recognizer = None;
+                    }
                 }
             }
 
@@ -140,7 +137,7 @@ fn main() {
                     .iter()
                     .any(|w| text.contains(w.as_str()))
                 {
-                    eprintln!("[Ассистент]: Хорошо, до встречи.");
+                    eprintln!("[Система]: Обнаружено стоп-слово, возврат в режим ожидания.");
                     state = AppState::Idle;
                     accumulated_text.clear();
                     silence_counter = 0;
@@ -191,7 +188,7 @@ fn main() {
 
                 // -- silence with no pending text → go idle --
                 if accumulated_text.is_empty() && silence_counter >= SILENCE_TO_IDLE_CHUNKS {
-                    eprintln!("[Ассистент]: (режим ожидания)");
+                    eprintln!("[Система]: Режим ожидания.");
                     state = AppState::Idle;
                     history = openai::initial_history(&config.assistant.system_prompt);
                     recognizer = None;
