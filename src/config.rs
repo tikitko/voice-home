@@ -146,8 +146,7 @@ pub struct ParamConfig {
 
 impl Config {
     pub fn load(path: &str) -> Result<Self, String> {
-        let content =
-            std::fs::read_to_string(path).map_err(|e| format!("{}: {}", path, e))?;
+        let content = std::fs::read_to_string(path).map_err(|e| format!("{}: {}", path, e))?;
         toml::from_str(&content).map_err(|e| format!("{}: {}", path, e))
     }
 }

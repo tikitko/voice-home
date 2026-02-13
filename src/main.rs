@@ -1,3 +1,5 @@
+#![allow(dead_code)]
+
 mod config;
 mod openai;
 mod tools;
@@ -33,7 +35,9 @@ fn main() {
     set_log_level(1);
 
     // ---- config ----
-    let config_path = std::env::args().nth(1).unwrap_or_else(|| "config.toml".into());
+    let config_path = std::env::args()
+        .nth(1)
+        .unwrap_or_else(|| "config.toml".into());
     let config = Config::load(&config_path).unwrap_or_else(|e| {
         eprintln!("Ошибка конфигурации: {}", e);
         std::process::exit(1);
@@ -58,8 +62,7 @@ fn main() {
     let mut state = AppState::Idle;
     let mut accumulated_text = String::new();
     let mut silence_counter: u32 = 0;
-    let mut history: Vec<Message> =
-        openai::initial_history(&config.assistant.system_prompt);
+    let mut history: Vec<Message> = openai::initial_history(&config.assistant.system_prompt);
 
     eprintln!("[Система]: Голосовой ассистент запущен.");
     eprintln!(
@@ -123,8 +126,7 @@ fn main() {
                     state = AppState::ListeningQuery;
                     accumulated_text = remainder;
                     silence_counter = 0;
-                    history =
-                        openai::initial_history(&config.assistant.system_prompt);
+                    history = openai::initial_history(&config.assistant.system_prompt);
                     recognizer = None;
                 }
             }
@@ -142,8 +144,7 @@ fn main() {
                     state = AppState::Idle;
                     accumulated_text.clear();
                     silence_counter = 0;
-                    history =
-                        openai::initial_history(&config.assistant.system_prompt);
+                    history = openai::initial_history(&config.assistant.system_prompt);
                     recognizer = None;
                     continue;
                 }
@@ -167,9 +168,7 @@ fn main() {
                 }
 
                 // -- have accumulated text & grace period elapsed → send to OpenAI --
-                if !accumulated_text.is_empty()
-                    && silence_counter >= CONTINUATION_CHUNKS
-                {
+                if !accumulated_text.is_empty() && silence_counter >= CONTINUATION_CHUNKS {
                     eprintln!("[Вы]: {}", accumulated_text);
 
                     let tools = tool_mgr.tools();
@@ -191,13 +190,10 @@ fn main() {
                 }
 
                 // -- silence with no pending text → go idle --
-                if accumulated_text.is_empty()
-                    && silence_counter >= SILENCE_TO_IDLE_CHUNKS
-                {
+                if accumulated_text.is_empty() && silence_counter >= SILENCE_TO_IDLE_CHUNKS {
                     eprintln!("[Ассистент]: (режим ожидания)");
                     state = AppState::Idle;
-                    history =
-                        openai::initial_history(&config.assistant.system_prompt);
+                    history = openai::initial_history(&config.assistant.system_prompt);
                     recognizer = None;
                 }
             }

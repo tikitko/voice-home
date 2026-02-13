@@ -1,11 +1,10 @@
+use async_openai::Client;
 use async_openai::types::chat::{
     ChatCompletionMessageToolCalls, ChatCompletionRequestAssistantMessageArgs,
     ChatCompletionRequestMessage, ChatCompletionRequestSystemMessageArgs,
-    ChatCompletionRequestToolMessageArgs, ChatCompletionRequestUserMessageArgs,
-    ChatCompletionTool, ChatCompletionTools, CreateChatCompletionRequestArgs,
-    FunctionObjectArgs,
+    ChatCompletionRequestToolMessageArgs, ChatCompletionRequestUserMessageArgs, ChatCompletionTool,
+    ChatCompletionTools, CreateChatCompletionRequestArgs, FunctionObjectArgs,
 };
-use async_openai::Client;
 use serde_json::Value;
 
 pub type Message = ChatCompletionRequestMessage;
@@ -27,7 +26,6 @@ pub fn initial_history(system_prompt: &str) -> Vec<Message> {
 // ---------------------------------------------------------------------------
 
 pub struct OpenAi {
-    rt: tokio::runtime::Runtime,
     client: Client<async_openai::config::OpenAIConfig>,
     model: String,
 }
@@ -35,16 +33,14 @@ pub struct OpenAi {
 impl OpenAi {
     /// Create a new instance.  Reads `OPENAI_API_KEY` from the environment.
     pub fn new(model: &str) -> Self {
-        let rt = tokio::runtime::Runtime::new().unwrap();
         let client = Client::new();
         Self {
-            rt,
             client,
             model: model.into(),
         }
     }
 
-    /// Send a user query and return the assistant's text reply.
+    /// Send a user query and return the assistant's text reply (blocking).
     /// Tool calls are dispatched via `execute_tool(name, args) -> result`.
     pub fn ask(
         &self,
@@ -62,8 +58,27 @@ impl OpenAi {
 
         let tools = Self::convert_tools(tools_json);
 
-        self.rt
-            .block_on(async { self.ask_loop(history, &tools, execute_tool).await })
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        rt.block_on(async { self.ask_loop(history, &tools, execute_tool).await })
+    }
+
+    /// Async variant for use inside an existing tokio runtime (e.g. Discord bot).
+    pub async fn ask_async(
+        &self,
+        query: &str,
+        history: &mut Vec<Message>,
+        tools_json: &[Value],
+        execute_tool: &mut impl FnMut(&str, Value) -> String,
+    ) -> String {
+        let user_msg: Message = ChatCompletionRequestUserMessageArgs::default()
+            .content(query)
+            .build()
+            .unwrap()
+            .into();
+        history.push(user_msg);
+
+        let tools = Self::convert_tools(tools_json);
+        self.ask_loop(history, &tools, execute_tool).await
     }
 
     // ------------------------------------------------------------------
@@ -101,32 +116,28 @@ impl OpenAi {
             // ---- handle tool calls ----
             if let Some(ref tool_calls) = choice.message.tool_calls {
                 if !tool_calls.is_empty() {
-                    let asst: Message =
-                        ChatCompletionRequestAssistantMessageArgs::default()
-                            .tool_calls(tool_calls.clone())
-                            .build()
-                            .unwrap()
-                            .into();
+                    let asst: Message = ChatCompletionRequestAssistantMessageArgs::default()
+                        .tool_calls(tool_calls.clone())
+                        .build()
+                        .unwrap()
+                        .into();
                     history.push(asst);
 
                     for tc_variant in tool_calls {
-                        let ChatCompletionMessageToolCalls::Function(tc) = tc_variant
-                        else {
+                        let ChatCompletionMessageToolCalls::Function(tc) = tc_variant else {
                             continue;
                         };
 
                         let args: Value =
-                            serde_json::from_str(&tc.function.arguments)
-                                .unwrap_or_default();
+                            serde_json::from_str(&tc.function.arguments).unwrap_or_default();
                         let result = execute_tool(&tc.function.name, args);
 
-                        let tool_msg: Message =
-                            ChatCompletionRequestToolMessageArgs::default()
-                                .tool_call_id(&tc.id)
-                                .content(result)
-                                .build()
-                                .unwrap()
-                                .into();
+                        let tool_msg: Message = ChatCompletionRequestToolMessageArgs::default()
+                            .tool_call_id(&tc.id)
+                            .content(result)
+                            .build()
+                            .unwrap()
+                            .into();
                         history.push(tool_msg);
                     }
                     continue;
