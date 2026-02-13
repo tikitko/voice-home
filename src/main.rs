@@ -12,7 +12,7 @@ use voskrust::sound::*;
 use config::Config;
 use openai::{Message, OpenAi};
 use tools::ToolManager;
-use tts::Tts;
+use tts::{SpeakHandle, Tts};
 
 const CONTINUATION_CHUNKS: u32 = 3; // ~300 ms grace period after final result for multi-sentence
 const SILENCE_TO_IDLE_CHUNKS: u32 = 20; // ~1.0 s of silence after response → idle
@@ -25,6 +25,7 @@ const SILENCE_TO_IDLE_CHUNKS: u32 = 20; // ~1.0 s of silence after response → 
 enum AppState {
     Idle,
     ListeningQuery,
+    Speaking,
 }
 
 // ---------------------------------------------------------------------------
@@ -63,6 +64,7 @@ fn main() {
     let mut accumulated_text = String::new();
     let mut silence_counter: u32 = 0;
     let mut history: Vec<Message> = openai::initial_history(&config.assistant.system_prompt);
+    let mut speak_handle: Option<SpeakHandle> = None;
 
     eprintln!("[Система]: Голосовой ассистент запущен.");
     eprintln!(
@@ -74,9 +76,11 @@ fn main() {
         // ---- time-range gate ----
         let hour = Local::now().hour();
         if hour < config.time_range.start_hour || hour >= config.time_range.end_hour {
-            println!("{}", hour);
             recognizer = None;
             audioreader = None;
+            if let Some(h) = speak_handle.take() {
+                h.stop();
+            }
             state = AppState::Idle;
             accumulated_text.clear();
             silence_counter = 0;
@@ -177,13 +181,15 @@ fn main() {
                     );
                     eprintln!("[Ассистент]: {}", response);
 
-                    // Stop mic → speak → mic auto-recreates next iteration
-                    audioreader = None;
-                    tts.speak(&response);
+                    // Start non-blocking playback, keep mic alive
                     recognizer = None;
-
+                    speak_handle = tts.speak_async(&response);
                     accumulated_text.clear();
                     silence_counter = 0;
+
+                    if speak_handle.is_some() {
+                        state = AppState::Speaking;
+                    }
                 }
 
                 // -- silence with no pending text → go idle --
@@ -191,6 +197,36 @@ fn main() {
                     eprintln!("[Система]: Режим ожидания.");
                     state = AppState::Idle;
                     history = openai::initial_history(&config.assistant.system_prompt);
+                    recognizer = None;
+                }
+            }
+
+            // ====================== SPEAKING ======================
+            AppState::Speaking => {
+                // -- stop word → cancel playback, go idle --
+                if config
+                    .assistant
+                    .stop_words
+                    .iter()
+                    .any(|w| text.contains(w.as_str()))
+                {
+                    eprintln!("[Система]: Обнаружено стоп-слово, остановка воспроизведения.");
+                    if let Some(h) = speak_handle.take() {
+                        h.stop();
+                    }
+                    state = AppState::Idle;
+                    accumulated_text.clear();
+                    silence_counter = 0;
+                    history = openai::initial_history(&config.assistant.system_prompt);
+                    recognizer = None;
+                    continue;
+                }
+
+                // -- playback finished → back to listening for follow-up --
+                if speak_handle.as_ref().map_or(true, |h| h.is_finished()) {
+                    speak_handle = None;
+                    state = AppState::ListeningQuery;
+                    silence_counter = 0;
                     recognizer = None;
                 }
             }
