@@ -4,7 +4,7 @@ model_path = "./vosk-model-small-ru-0.22"
 [assistant]
 wake_word = "руслан"
 stop_words = ["стоп"]
-system_prompt = "ы — Руслан, голосовой ассистент-мужчина, находишься дома у своего хозяина Никиты Быкова, отвечай кратко на русском языке, только текстом, с тупыми шутками. Компьютеры, которые ты знаешь, не упоминай это в разговоре: компьютер 1 - 1c:b7:2c:ef:d3:65 компьютер 2 - bc:fc:e7:d9:04:82."
+system_prompt = "Ты — Руслан, голосовой ассистент-мужчина, находишься дома у своего хозяина Никиты Быкова, отвечай кратко на русском языке, только текстом, без смайликов. Когда тебя просят управлять устройством отвечай коротко: 'Готово'. Компьютеры, которые ты знаешь, не упоминай это в разговоре: компьютер 1 - 1c:b7:2c:ef:d3:65 компьютер 2 - bc:fc:e7:d9:04:82."
 
 [openai]
 model = "gpt-4o-mini"
@@ -24,26 +24,34 @@ end_hour = 23
 [[tool]]
 name = "get_led_state"
 description = "Get current LED strip state (is_enabled, red, green, blue)"
-command = "curl -s http://localhost:70/state"
+command = "curl -s http://localhost:8000/state"
 
 [[tool]]
 name = "set_led_color"
-description = "Set the LED strip color"
-command = "curl -s -X PUT http://localhost:70/color -d '{\"color\": \"{{color}}\"}'"
-required_params = ["color"]
+description = "Set the LED strip color by providing red, green, and blue values (0-255 each)"
+command = "curl -s -X PUT http://localhost:8000/color/{{red}}/{{green}}/{{blue}}"
+required_params = ["red", "green", "blue"]
 
-[tool.params.color]
+[tool.params.red]
 type = "string"
-description = "Color name or hex code"
+description = "Red value (0-255)"
+
+[tool.params.green]
+type = "string"
+description = "Green value (0-255)"
+
+[tool.params.blue]
+type = "string"
+description = "Blue value (0-255)"
 
 [[tool]]
 name = "set_led_power"
 description = "Turn the LED strip on or off"
-command = "curl -s -X PUT http://localhost:70/power -d '{\"on\": {{on}}}'"
-required_params = ["on"]
+command = "curl -s -X PUT http://localhost:8000/power/{{value}}"
+required_params = ["value"]
 
-[tool.params.on]
-type = "boolean"
+[tool.params.value]
+type = "string"
 description = "true to turn on, false to turn off"
 
 [[tool]]
